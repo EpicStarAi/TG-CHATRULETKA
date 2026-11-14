@@ -3,12 +3,18 @@ __DOMAIN__ {
 	handle /ws* {
 		reverse_proxy 127.0.0.1:8080
 	}
+	handle /auth/* {
+		reverse_proxy 127.0.0.1:8080
+	}
+	handle /config {
+		reverse_proxy 127.0.0.1:8080
+	}
+	handle /health {
+		reverse_proxy 127.0.0.1:8080
+	}
 	handle {
 		root * /opt/tg-chatruletka/client/dist
 		try_files {path} /index.html
 		file_server
-		reverse_proxy /auth/* 127.0.0.1:8080
-		reverse_proxy /config 127.0.0.1:8080
-		reverse_proxy /health 127.0.0.1:8080
 	}
 }

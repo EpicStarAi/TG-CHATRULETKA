@@ -18,9 +18,9 @@ if ! command -v caddy >/dev/null; then
 fi
 
 if [ -d "$APP_DIR/.git" ]; then git -C "$APP_DIR" pull --ff-only; else git clone "$REPO" "$APP_DIR"; fi
-cd "$APP_DIR" && npm ci --omit=dev || npm install --omit=dev
-npm --prefix "$APP_DIR" install --no-audit --no-fund
-(cd client && npm install --no-audit --no-fund && npx vite build) 2>/dev/null || npm run build
+cd "$APP_DIR"
+npm install --no-audit --no-fund
+npm run build
 
 ENV_FILE=/etc/tg-chatruletka.env
 if [ ! -f "$ENV_FILE" ]; then
