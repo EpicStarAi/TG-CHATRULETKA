@@ -1,0 +1,13 @@
+[Unit]
+Description=TG CHATRULETKA server
+After=network.target
+
+[Service]
+WorkingDirectory=/opt/tg-chatruletka
+EnvironmentFile=/etc/tg-chatruletka.env
+ExecStart=/usr/bin/node server/index.js
+Restart=always
+User=root
+
+[Install]
+WantedBy=multi-user.target
