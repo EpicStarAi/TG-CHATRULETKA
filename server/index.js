@@ -1,0 +1,172 @@
+// TG CHATRULETKA signaling and auth server (Node 18+, no framework)
+import http from 'node:http';
+import crypto from 'node:crypto';
+import { WebSocketServer } from 'ws';
+
+const PORT = Number(process.env.PORT || 8080);
+const BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN || '';
+const GOOGLE_CLIENT_ID = process.env.GOOGLE_CLIENT_ID || '';
+const GOOGLE_CLIENT_SECRET = process.env.GOOGLE_CLIENT_SECRET || '';
+const PUBLIC_URL = process.env.PUBLIC_URL || `http://localhost:${PORT}`;
+const ICE_SERVERS = JSON.parse(process.env.ICE_SERVERS || '[{"urls":"stun:stun.l.google.com:19302"}]');
+const SESSION_TTL_MS = 12 * 60 * 60 * 1000;
+
+const sessions = new Map(); // token -> { userId, provider, name, exp }
+const users = new Map();    // userId -> profile
+const waiting = [];         // queue of socket clients
+const clients = new Set();
+
+// ---- Telegram Mini App initData verification (HMAC per Telegram docs) ----
+export function verifyTelegramInitData(initData, botToken, maxAgeSec = 86400) {
+  const params = new URLSearchParams(initData);
+  const hash = params.get('hash');
+  if (!hash || !botToken) return null;
+  params.delete('hash');
+  const dataCheck = [...params.entries()]
+    .sort(([a], [b]) => (a < b ? -1 : 1))
+    .map(([k, v]) => `${k}=${v}`)
+    .join('\n');
+  const secret = crypto.createHmac('sha256', 'WebAppData').update(botToken).digest();
+  const calc = crypto.createHmac('sha256', secret).update(dataCheck).digest('hex');
+  if (calc.length !== hash.length || !crypto.timingSafeEqual(Buffer.from(calc), Buffer.from(hash))) return null;
+  const authDate = Number(params.get('auth_date') || 0);
+  if (Date.now() / 1000 - authDate > maxAgeSec) return null;
+  const user = JSON.parse(params.get('user') || '{}');
+  return { id: `tg:${user.id}`, provider: 'telegram', name: user.first_name || 'User' };
+}
+
+function issueSession(profile) {
+  const token = crypto.randomBytes(32).toString('hex');
+  users.set(profile.id, profile);
+  sessions.set(token, { userId: profile.id, exp: Date.now() + SESSION_TTL_MS });
+  return token;
+}
+
+function readJson(req) {
+  return new Promise((resolve, reject) => {
+    let body = '';
+    req.on('data', (c) => { body += c; if (body.length > 1e5) reject(new Error('too large')); });
+    req.on('end', () => { try { resolve(JSON.parse(body || '{}')); } catch (e) { reject(e); } });
+  });
+}
+
+function send(res, code, obj) {
+  res.writeHead(code, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' });
+  res.end(JSON.stringify(obj));
+}
+
+const server = http.createServer(async (req, res) => {
+  const url = new URL(req.url, PUBLIC_URL);
+
+  if (url.pathname === '/config') return send(res, 200, { iceServers: ICE_SERVERS, telegramEnabled: !!BOT_TOKEN, googleEnabled: !!GOOGLE_CLIENT_ID });
+
+  if (url.pathname === '/auth/telegram' && req.method === 'POST') {
+    try {
+      const { initData } = await readJson(req);
+      const profile = verifyTelegramInitData(String(initData || ''), BOT_TOKEN);
+      if (!profile) return send(res, 401, { error: 'invalid_init_data' });
+      return send(res, 200, { token: issueSession(profile), name: profile.name });
+    } catch { return send(res, 400, { error: 'bad_request' }); }
+  }
+
+  // Google OAuth (authorization code flow). Redirect here from the "Gmail" button.
+  if (url.pathname === '/auth/google') {
+    if (!GOOGLE_CLIENT_ID) return send(res, 503, { error: 'google_not_configured' });
+    const state = crypto.randomBytes(16).toString('hex');
+    const q = new URLSearchParams({
+      client_id: GOOGLE_CLIENT_ID, redirect_uri: `${PUBLIC_URL}/auth/google/callback`,
+      response_type: 'code', scope: 'openid email profile', state, prompt: 'select_account',
+    });
+    res.writeHead(302, { Location: `https://accounts.google.com/o/oauth2/v2/auth?${q}` });
+    return res.end();
+  }
+
+  if (url.pathname === '/auth/google/callback') {
+    try {
+      const code = url.searchParams.get('code');
+      const tok = await fetch('https://oauth2.googleapis.com/token', {
+        method: 'POST', headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+        body: new URLSearchParams({
+          code, client_id: GOOGLE_CLIENT_ID, client_secret: GOOGLE_CLIENT_SECRET,
+          redirect_uri: `${PUBLIC_URL}/auth/google/callback`, grant_type: 'authorization_code',
+        }),
+      }).then((r) => r.json());
+      const info = await fetch('https://openidconnect.googleapis.com/v1/userinfo', {
+        headers: { Authorization: `Bearer ${tok.access_token}` },
+      }).then((r) => r.json());
+      if (!info.email) return send(res, 401, { error: 'no_email' });
+      const token = issueSession({ id: `google:${info.sub}`, provider: 'google', name: info.given_name || info.email });
+      res.writeHead(302, { Location: `${PUBLIC_URL}/?token=${token}` });
+      return res.end();
+    } catch { return send(res, 502, { error: 'oauth_failed' }); }
+  }
+
+  if (url.pathname === '/health') return send(res, 200, { ok: true, online: clients.size });
+  return send(res, 404, { error: 'not_found' });
+});
+
+// ---- Matchmaking and WebRTC signaling over WebSocket ----
+const wss = new WebSocketServer({ server, path: '/ws' });
+
+function sessionFromToken(token) {
+  const s = sessions.get(token);
+  if (!s || s.exp < Date.now()) return null;
+  return users.get(s.userId);
+}
+
+function removeFromQueue(ws) {
+  const i = waiting.indexOf(ws);
+  if (i >= 0) waiting.splice(i, 1);
+}
+
+function unpair(ws, notify = true) {
+  const peer = ws.peer;
+  if (!peer) return;
+  ws.peer = null;
+  peer.peer = null;
+  if (notify && peer.readyState === 1) peer.send(JSON.stringify({ type: 'peer_left' }));
+}
+
+function tryMatch(ws) {
+  removeFromQueue(ws);
+  const other = waiting.find((w) => w !== ws && w.readyState === 1 && w.user.id !== ws.user.id);
+  if (!other) { waiting.push(ws); ws.send(JSON.stringify({ type: 'searching' })); return; }
+  removeFromQueue(other);
+  ws.peer = other; other.peer = ws;
+  ws.send(JSON.stringify({ type: 'matched', role: 'caller', name: other.user.name }));
+  other.send(JSON.stringify({ type: 'matched', role: 'callee', name: ws.user.name }));
+}
+
+wss.on('connection', (ws, req) => {
+  const token = new URL(req.url, PUBLIC_URL).searchParams.get('token') || '';
+  const user = sessionFromToken(token);
+  if (!user) { ws.send(JSON.stringify({ type: 'auth_required' })); return ws.close(4401); }
+  ws.user = user;
+  clients.add(ws);
+  ws.on('message', (raw) => {
+    let msg; try { msg = JSON.parse(String(raw)); } catch { return; }
+    switch (msg.type) {
+      case 'start': return tryMatch(ws);
+      case 'next': unpair(ws); return tryMatch(ws);
+      case 'stop': unpair(ws); removeFromQueue(ws); return;
+      case 'signal':
+        if (ws.peer && ws.peer.readyState === 1) ws.peer.send(JSON.stringify({ type: 'signal', data: msg.data }));
+        return;
+      case 'chat':
+        if (ws.peer && ws.peer.readyState === 1 && typeof msg.text === 'string') {
+          ws.peer.send(JSON.stringify({ type: 'chat', text: msg.text.slice(0, 500) }));
+        }
+        return;
+      case 'report': // store for moderation; here we just drop the pair
+        console.log(`report by ${ws.user.id} against peer ${ws.peer?.user?.id}`);
+        unpair(ws); removeFromQueue(ws); return;
+    }
+  });
+  ws.on('close', () => { unpair(ws); removeFromQueue(ws); clients.delete(ws); });
+});
+
+if (process.argv[1] && process.argv[1].endsWith('index.js')) {
+  server.listen(PORT, () => console.log(`TG CHATRULETKA server on :${PORT}`));
+}
+
+export { server, sessions, users };
