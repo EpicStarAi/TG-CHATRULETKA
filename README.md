@@ -9,7 +9,6 @@ Telegram Mini App for random one-to-one video chat. Adults only (18+).
 
 ## Login
 - Telegram: the server verifies `initData` with HMAC using the bot token (`server/index.js`, `verifyTelegramInitData`).
-- Gmail: Google OAuth. Set the redirect URI to `PUBLIC_URL/auth/google/callback` in Google Cloud.
 
 ## Production
 Serve `client/dist` and `server/` behind HTTPS (Caddy or nginx). WebRTC needs a TURN server for many networks.

@@ -1,12 +1,10 @@
-// TG CHATRULETKA signaling and auth server (Node 18+, no framework)
+// TG CHATRULETKA signaling and Telegram auth server (Node 18+, no framework)
 import http from 'node:http';
 import crypto from 'node:crypto';
 import { WebSocketServer } from 'ws';
 
 const PORT = Number(process.env.PORT || 8080);
 const BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN || '';
-const GOOGLE_CLIENT_ID = process.env.GOOGLE_CLIENT_ID || '';
-const GOOGLE_CLIENT_SECRET = process.env.GOOGLE_CLIENT_SECRET || '';
 const PUBLIC_URL = process.env.PUBLIC_URL || `http://localhost:${PORT}`;
 const ICE_SERVERS = JSON.parse(process.env.ICE_SERVERS || '[{"urls":"stun:stun.l.google.com:19302"}]');
 const SESSION_TTL_MS = 12 * 60 * 60 * 1000;
@@ -58,7 +56,7 @@ function send(res, code, obj) {
 const server = http.createServer(async (req, res) => {
   const url = new URL(req.url, PUBLIC_URL);
 
-  if (url.pathname === '/config') return send(res, 200, { iceServers: ICE_SERVERS, telegramEnabled: !!BOT_TOKEN, googleEnabled: !!GOOGLE_CLIENT_ID });
+  if (url.pathname === '/config') return send(res, 200, { iceServers: ICE_SERVERS, telegramEnabled: !!BOT_TOKEN });
 
   if (url.pathname === '/auth/telegram' && req.method === 'POST') {
     try {
@@ -67,38 +65,6 @@ const server = http.createServer(async (req, res) => {
       if (!profile) return send(res, 401, { error: 'invalid_init_data' });
       return send(res, 200, { token: issueSession(profile), name: profile.name });
     } catch { return send(res, 400, { error: 'bad_request' }); }
-  }
-
-  // Google OAuth (authorization code flow). Redirect here from the "Gmail" button.
-  if (url.pathname === '/auth/google') {
-    if (!GOOGLE_CLIENT_ID) return send(res, 503, { error: 'google_not_configured' });
-    const state = crypto.randomBytes(16).toString('hex');
-    const q = new URLSearchParams({
-      client_id: GOOGLE_CLIENT_ID, redirect_uri: `${PUBLIC_URL}/auth/google/callback`,
-      response_type: 'code', scope: 'openid email profile', state, prompt: 'select_account',
-    });
-    res.writeHead(302, { Location: `https://accounts.google.com/o/oauth2/v2/auth?${q}` });
-    return res.end();
-  }
-
-  if (url.pathname === '/auth/google/callback') {
-    try {
-      const code = url.searchParams.get('code');
-      const tok = await fetch('https://oauth2.googleapis.com/token', {
-        method: 'POST', headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-        body: new URLSearchParams({
-          code, client_id: GOOGLE_CLIENT_ID, client_secret: GOOGLE_CLIENT_SECRET,
-          redirect_uri: `${PUBLIC_URL}/auth/google/callback`, grant_type: 'authorization_code',
-        }),
-      }).then((r) => r.json());
-      const info = await fetch('https://openidconnect.googleapis.com/v1/userinfo', {
-        headers: { Authorization: `Bearer ${tok.access_token}` },
-      }).then((r) => r.json());
-      if (!info.email) return send(res, 401, { error: 'no_email' });
-      const token = issueSession({ id: `google:${info.sub}`, provider: 'google', name: info.given_name || info.email });
-      res.writeHead(302, { Location: `${PUBLIC_URL}/?token=${token}` });
-      return res.end();
-    } catch { return send(res, 502, { error: 'oauth_failed' }); }
   }
 
   if (url.pathname === '/health') return send(res, 200, { ok: true, online: clients.size });

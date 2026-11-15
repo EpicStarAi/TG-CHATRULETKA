@@ -29,8 +29,6 @@ if [ ! -f "$ENV_FILE" ]; then
 PORT=8080
 PUBLIC_URL=https://$DOMAIN
 TELEGRAM_BOT_TOKEN=$BOT_TOKEN
-GOOGLE_CLIENT_ID=
-GOOGLE_CLIENT_SECRET=
 ICE_SERVERS=[{"urls":"stun:stun.l.google.com:19302"}]
 ENV
   chmod 600 "$ENV_FILE"
