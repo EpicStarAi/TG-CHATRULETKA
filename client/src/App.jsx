@@ -7,12 +7,7 @@ const WS_BASE = (API || window.location.origin).replace(/^http/, 'ws');
 export default function App() {
   const [lang, setLang] = useState(localStorage.getItem('lang') || 'en');
   const [ageOk, setAgeOk] = useState(localStorage.getItem('age18') === '1');
-  const [token, setToken] = useState(() => {
-    const u = new URL(window.location.href);
-    const t = u.searchParams.get('token');
-    if (t) { localStorage.setItem('token', t); window.history.replaceState({}, '', '/'); }
-    return localStorage.getItem('token') || '';
-  });
+  const [token, setToken] = useState(() => localStorage.getItem('token') || '');
   const [status, setStatus] = useState('idle'); // idle | searching | matched
   const [peerName, setPeerName] = useState('');
   const [messages, setMessages] = useState([]);
@@ -154,7 +149,6 @@ export default function App() {
         <header className="brand"><img src="/logo.svg" alt="" /><h1>TG⭐CHATRULETKA</h1>{LangPicker}</header>
         <p className="lead">{t.loginText}</p>
         <a className="btn tg" href={config?.telegramEnabled ? 'https://t.me/' + (import.meta.env.VITE_BOT_USERNAME || '') : '#'}>{t.loginTelegram}</a>
-        <a className="btn gmail" href={`${API}/auth/google`}>{t.loginGmail}</a>
         <p className="fine">{t.legal}</p>
       </div>
     );

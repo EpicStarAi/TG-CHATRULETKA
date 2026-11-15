@@ -13,7 +13,6 @@ body { background: radial-gradient(circle at 20% 0%, #1b3a80 0%, var(--bg) 60%);
 .btn:disabled { opacity: .4; cursor: default; }
 .btn.primary { background: linear-gradient(135deg, var(--accent), var(--accent2)); color: #06112a; }
 .btn.tg { background: #229ed9; color: #fff; }
-.btn.gmail { background: #fff; color: #222; }
 .btn.stop { background: #e5786d; color: #fff; }
 .btn.ghost { background: transparent; border: 1px solid #2c4680; }
 .btn.next { background: var(--gold); color: #1a1400; }
