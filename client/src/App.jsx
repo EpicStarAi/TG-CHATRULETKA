@@ -29,18 +29,35 @@ export default function App() {
     fetch(`${API}/config`).then((r) => r.json()).then(setConfig).catch(() => setConfig({ iceServers: [] }));
   }, []);
 
-  // Telegram Mini App: log in automatically with initData
-  useEffect(() => {
-    const init = window.Telegram?.WebApp?.initData;
-    if (!init || token) return;
-    window.Telegram.WebApp.ready();
+  // Telegram Mini App sign-in with initData. Runs automatically on open and again from the button.
+  const tg = window.Telegram?.WebApp;
+  const inTelegram = !!tg && !!tg.platform && tg.platform !== 'unknown';
+  const [authBusy, setAuthBusy] = useState(false);
+  const [authError, setAuthError] = useState('');
+
+  function telegramLogin() {
+    const init = tg?.initData;
+    if (!init) { setAuthError(inTelegram ? t.errNoInitData : t.errOpenInTelegram); return; }
+    setAuthBusy(true); setAuthError('');
     fetch(`${API}/auth/telegram`, {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ initData: init }),
-    }).then((r) => r.json()).then((d) => {
-      if (d.token) { localStorage.setItem('token', d.token); setToken(d.token); }
-    });
-  }, [token]);
+    })
+      .then(async (r) => {
+        const d = await r.json().catch(() => ({}));
+        if (r.ok && d.token) { localStorage.setItem('token', d.token); setToken(d.token); return; }
+        setAuthError(d.error === 'expired' ? t.errExpired : `${t.errRejected} (${d.error || r.status})`);
+      })
+      .catch(() => setAuthError(t.errNetwork))
+      .finally(() => setAuthBusy(false));
+  }
+
+  useEffect(() => {
+    tg?.ready?.();
+    tg?.expand?.();
+    if (tg?.initData && !token) telegramLogin();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   function acceptAge() {
     localStorage.setItem('age18', '1');
@@ -150,7 +167,10 @@ export default function App() {
       <div className="screen login">
         <header className="brand"><img src="/logo.svg" alt="" /><h1>TG⭐CHATRULETKA</h1>{LangPicker}</header>
         <p className="lead">{t.loginText}</p>
-        <a className="btn tg" href={config?.telegramEnabled ? 'https://t.me/' + (import.meta.env.VITE_BOT_USERNAME || '') : '#'}>{t.loginTelegram}</a>
+        {inTelegram
+          ? <button className="btn tg" onClick={telegramLogin} disabled={authBusy}>{authBusy ? t.signingIn : t.loginTelegram}</button>
+          : <a className="btn tg" href={`https://t.me/${config?.botUsername || import.meta.env.VITE_BOT_USERNAME || ''}`}>{t.loginTelegram}</a>}
+        {authError && <p className="error">{authError}</p>}
         <p className="fine">{t.legal}</p>
       </div>
     );
