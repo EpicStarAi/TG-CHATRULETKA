@@ -19,10 +19,13 @@ const waiting = [];         // queue of socket clients
 const clients = new Set();
 
 // ---- Telegram Mini App initData verification (HMAC per Telegram docs) ----
-export function verifyTelegramInitData(initData, botToken, maxAgeSec = 86400) {
+// Returns { profile } or { error } with a short reason code (no secrets) for logs and the client.
+export function checkTelegramInitData(initData, botToken, maxAgeSec = 86400) {
+  if (!botToken) return { error: 'bot_token_missing' };
+  if (!initData) return { error: 'init_data_empty' };
   const params = new URLSearchParams(initData);
   const hash = params.get('hash');
-  if (!hash || !botToken) return null;
+  if (!hash) return { error: 'hash_missing' };
   params.delete('hash');
   const dataCheck = [...params.entries()]
     .sort(([a], [b]) => (a < b ? -1 : 1))
@@ -30,11 +33,33 @@ export function verifyTelegramInitData(initData, botToken, maxAgeSec = 86400) {
     .join('\n');
   const secret = crypto.createHmac('sha256', 'WebAppData').update(botToken).digest();
   const calc = crypto.createHmac('sha256', secret).update(dataCheck).digest('hex');
-  if (calc.length !== hash.length || !crypto.timingSafeEqual(Buffer.from(calc), Buffer.from(hash))) return null;
+  if (calc.length !== hash.length || !crypto.timingSafeEqual(Buffer.from(calc), Buffer.from(hash))) {
+    return { error: 'bad_signature' }; // usually: TELEGRAM_BOT_TOKEN belongs to a different bot
+  }
   const authDate = Number(params.get('auth_date') || 0);
-  if (Date.now() / 1000 - authDate > maxAgeSec) return null;
-  const user = JSON.parse(params.get('user') || '{}');
-  return { id: `tg:${user.id}`, provider: 'telegram', name: user.first_name || 'User' };
+  if (Date.now() / 1000 - authDate > maxAgeSec) return { error: 'expired' };
+  let user;
+  try { user = JSON.parse(params.get('user') || '{}'); } catch { return { error: 'bad_user' }; }
+  if (!user.id) return { error: 'bad_user' };
+  return { profile: { id: `tg:${user.id}`, provider: 'telegram', name: user.first_name || 'User' } };
+}
+
+export function verifyTelegramInitData(initData, botToken, maxAgeSec = 86400) {
+  return checkTelegramInitData(initData, botToken, maxAgeSec).profile || null;
+}
+
+// Which bot does TELEGRAM_BOT_TOKEN belong to? Logged at startup and exposed in /config,
+// so a token from the wrong bot is visible immediately.
+let botUsername = process.env.TELEGRAM_BOT_USERNAME || '';
+async function loadBotInfo() {
+  if (!BOT_TOKEN) { console.warn('TELEGRAM_BOT_TOKEN is not set: Telegram sign-in is disabled'); return; }
+  try {
+    const r = await fetch(`https://api.telegram.org/bot${BOT_TOKEN}/getMe`).then((x) => x.json());
+    if (r.ok) { botUsername = r.result.username; console.log(`Telegram bot: @${botUsername}`); }
+    else console.warn(`Telegram getMe rejected the bot token: ${r.description}`);
+  } catch (e) {
+    console.warn(`Telegram getMe failed: ${e.message}`);
+  }
 }
 
 // TURN REST API credentials (coturn `use-auth-secret`): username = "<expiry>:<user>", password = base64(HMAC-SHA1(secret, username)).
@@ -73,13 +98,16 @@ function send(res, code, obj) {
 const server = http.createServer(async (req, res) => {
   const url = new URL(req.url, PUBLIC_URL);
 
-  if (url.pathname === '/config') return send(res, 200, { iceServers: ICE_SERVERS, telegramEnabled: !!BOT_TOKEN });
+  if (url.pathname === '/config') return send(res, 200, { iceServers: ICE_SERVERS, telegramEnabled: !!BOT_TOKEN, botUsername });
 
   if (url.pathname === '/auth/telegram' && req.method === 'POST') {
     try {
       const { initData } = await readJson(req);
-      const profile = verifyTelegramInitData(String(initData || ''), BOT_TOKEN);
-      if (!profile) return send(res, 401, { error: 'invalid_init_data' });
+      const { profile, error } = checkTelegramInitData(String(initData || ''), BOT_TOKEN);
+      if (!profile) {
+        console.warn(`Telegram sign-in rejected: ${error}`);
+        return send(res, 401, { error });
+      }
       return send(res, 200, { token: issueSession(profile), name: profile.name });
     } catch { return send(res, 400, { error: 'bad_request' }); }
   }
@@ -150,6 +178,7 @@ wss.on('connection', (ws, req) => {
 
 if (process.argv[1] && process.argv[1].endsWith('index.js')) {
   server.listen(PORT, () => console.log(`TG CHATRULETKA server on :${PORT}`));
+  loadBotInfo();
 }
 
 export { server, sessions, users };

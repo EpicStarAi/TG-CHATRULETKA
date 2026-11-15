@@ -41,3 +41,15 @@ test('no TURN credentials without secret or URLs', () => {
   assert.equal(turnCredentials('tg:1', { secret: '', urls: ['turn:x'] }), null);
   assert.equal(turnCredentials('tg:1', { secret: 'x', urls: [] }), null);
 });
+
+test('reports why Telegram sign-in was rejected', async () => {
+  const { checkTelegramInitData } = await import('./index.js');
+  const good = signedInitData({ auth_date: now(), user: JSON.stringify({ id: 7 }) });
+  assert.equal(checkTelegramInitData(good, '').error, 'bot_token_missing');
+  assert.equal(checkTelegramInitData('', BOT).error, 'init_data_empty');
+  assert.equal(checkTelegramInitData('user=%7B%7D', BOT).error, 'hash_missing');
+  assert.equal(checkTelegramInitData(good, '999:OTHER').error, 'bad_signature');
+  const old = signedInitData({ auth_date: '1', user: JSON.stringify({ id: 7 }) });
+  assert.equal(checkTelegramInitData(old, BOT).error, 'expired');
+  assert.equal(checkTelegramInitData(good, BOT).profile.id, 'tg:7');
+});
