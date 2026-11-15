@@ -21,6 +21,7 @@ export default function App() {
   const localRef = useRef(null);
   const remoteRef = useRef(null);
   const streamRef = useRef(null);
+  const iceRef = useRef(null); // per-match ICE servers (incl. short-lived TURN credentials) from the server
 
   useEffect(() => { localStorage.setItem('lang', lang); }, [lang]);
 
@@ -61,7 +62,7 @@ export default function App() {
 
   function makePeer(role) {
     closePeer();
-    const pc = new RTCPeerConnection({ iceServers: config?.iceServers || [] });
+    const pc = new RTCPeerConnection({ iceServers: iceRef.current || config?.iceServers || [] });
     pcRef.current = pc;
     streamRef.current?.getTracks().forEach((tr) => pc.addTrack(tr, streamRef.current));
     pc.ontrack = (e) => { if (remoteRef.current) remoteRef.current.srcObject = e.streams[0]; };
@@ -102,6 +103,7 @@ export default function App() {
       if (msg.type === 'searching') setStatus('searching');
       if (msg.type === 'matched') {
         setStatus('matched'); setPeerName(msg.name); setMessages([]);
+        iceRef.current = msg.iceServers || null;
         if (msg.role === 'caller') makePeer('caller');
         else makePeer('callee');
       }
