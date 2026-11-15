@@ -8,6 +8,10 @@ const BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN || '';
 const PUBLIC_URL = process.env.PUBLIC_URL || `http://localhost:${PORT}`;
 const ICE_SERVERS = JSON.parse(process.env.ICE_SERVERS || '[{"urls":"stun:stun.l.google.com:19302"}]');
 const SESSION_TTL_MS = 12 * 60 * 60 * 1000;
+// TURN relay (coturn with use-auth-secret). Credentials are short-lived and only handed to signed-in users.
+const TURN_SECRET = process.env.TURN_SECRET || '';
+const TURN_URLS = (process.env.TURN_URLS || '').split(',').map((u) => u.trim()).filter(Boolean);
+const TURN_TTL_SEC = 6 * 60 * 60;
 
 const sessions = new Map(); // token -> { userId, provider, name, exp }
 const users = new Map();    // userId -> profile
@@ -31,6 +35,19 @@ export function verifyTelegramInitData(initData, botToken, maxAgeSec = 86400) {
   if (Date.now() / 1000 - authDate > maxAgeSec) return null;
   const user = JSON.parse(params.get('user') || '{}');
   return { id: `tg:${user.id}`, provider: 'telegram', name: user.first_name || 'User' };
+}
+
+// TURN REST API credentials (coturn `use-auth-secret`): username = "<expiry>:<user>", password = base64(HMAC-SHA1(secret, username)).
+export function turnCredentials(userId, { secret = TURN_SECRET, urls = TURN_URLS, now = Date.now(), ttlSec = TURN_TTL_SEC } = {}) {
+  if (!secret || !urls.length) return null;
+  const username = `${Math.floor(now / 1000) + ttlSec}:${String(userId).replace(/:/g, '-')}`;
+  const credential = crypto.createHmac('sha1', secret).update(username).digest('base64');
+  return { urls, username, credential };
+}
+
+function iceServersFor(user) {
+  const turn = turnCredentials(user.id);
+  return turn ? [...ICE_SERVERS, turn] : ICE_SERVERS;
 }
 
 function issueSession(profile) {
@@ -99,8 +116,8 @@ function tryMatch(ws) {
   if (!other) { waiting.push(ws); ws.send(JSON.stringify({ type: 'searching' })); return; }
   removeFromQueue(other);
   ws.peer = other; other.peer = ws;
-  ws.send(JSON.stringify({ type: 'matched', role: 'caller', name: other.user.name }));
-  other.send(JSON.stringify({ type: 'matched', role: 'callee', name: ws.user.name }));
+  ws.send(JSON.stringify({ type: 'matched', role: 'caller', name: other.user.name, iceServers: iceServersFor(ws.user) }));
+  other.send(JSON.stringify({ type: 'matched', role: 'callee', name: ws.user.name, iceServers: iceServersFor(other.user) }));
 }
 
 wss.on('connection', (ws, req) => {
