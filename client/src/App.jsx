@@ -18,6 +18,9 @@ export default function App() {
   const [showSettings, setShowSettings] = useState(false);
   const [online, setOnline] = useState(null);
   const facingRef = useRef('user'); // 'user' | 'environment' for camera flip
+  const [iceState, setIceState] = useState(''); // live ICE state for on-screen diagnostics
+  const [gotRemote, setGotRemote] = useState(false); // whether a remote media track has arrived
+  const pendingCandidatesRef = useRef([]); // ICE candidates received before remoteDescription is set
 
   const t = T[lang];
   const wsRef = useRef(null);
@@ -160,7 +163,9 @@ export default function App() {
   function closePeer() {
     pcRef.current?.close();
     pcRef.current = null;
+    pendingCandidatesRef.current = [];
     if (remoteRef.current) remoteRef.current.srcObject = null;
+    setIceState(''); setGotRemote(false);
   }
 
   function makePeer(role) {
@@ -168,8 +173,18 @@ export default function App() {
     const pc = new RTCPeerConnection({ iceServers: iceRef.current || config?.iceServers || [] });
     pcRef.current = pc;
     streamRef.current?.getTracks().forEach((tr) => pc.addTrack(tr, streamRef.current));
-    pc.ontrack = (e) => { if (remoteRef.current) remoteRef.current.srcObject = e.streams[0]; };
-    pc.onicecandidate = (e) => { if (e.candidate) wsRef.current?.send(JSON.stringify({ type: 'signal', data: { candidate: e.candidate } })); };
+    pc.ontrack = (e) => {
+      console.info('remote track received:', e.track?.kind);
+      setGotRemote(true);
+      if (remoteRef.current) { remoteRef.current.srcObject = e.streams[0]; remoteRef.current.play?.().catch(() => {}); }
+    };
+    pc.oniceconnectionstatechange = () => { console.info('ICE state:', pc.iceConnectionState); setIceState(pc.iceConnectionState); };
+    pc.onicecandidate = (e) => {
+      if (e.candidate) {
+        if (/ relay /.test(` ${e.candidate.candidate} `) || e.candidate.type === 'relay') console.info('local relay candidate gathered');
+        wsRef.current?.send(JSON.stringify({ type: 'signal', data: { candidate: e.candidate } }));
+      }
+    };
     if (role === 'caller') {
       pc.onnegotiationneeded = async () => {
         const offer = await pc.createOffer();
@@ -180,16 +195,25 @@ export default function App() {
     return pc;
   }
 
+  async function flushCandidates(pc) {
+    const list = pendingCandidatesRef.current;
+    pendingCandidatesRef.current = [];
+    for (const c of list) await pc.addIceCandidate(c).catch(() => {});
+  }
+
   async function handleSignal(data) {
     let pc = pcRef.current;
     if (data.sdp) {
       if (!pc) pc = makePeer('callee');
       await pc.setRemoteDescription(data.sdp);
+      await flushCandidates(pc); // apply any ICE candidates that arrived before the remote description
       if (data.sdp.type === 'offer') {
         await pc.setLocalDescription(await pc.createAnswer());
         wsRef.current?.send(JSON.stringify({ type: 'signal', data: { sdp: pc.localDescription } }));
       }
     } else if (data.candidate && pc) {
+      // Queue candidates until the remote description exists, otherwise addIceCandidate throws and the candidate is lost.
+      if (!pc.remoteDescription || !pc.remoteDescription.type) { pendingCandidatesRef.current.push(data.candidate); return; }
       await pc.addIceCandidate(data.candidate).catch(() => {});
     }
   }
@@ -299,6 +323,7 @@ export default function App() {
         )}
         {active && status !== 'matched' && <div className="overlay">{t.searching}</div>}
         {peerName && <div className="peer">{peerName}</div>}
+        {status === 'matched' && <div className="diag">ICE: {iceState || '—'} · video: {gotRemote ? '✓' : '…'}</div>}
         <div className="self-wrap">
           <video ref={localRef} autoPlay playsInline muted className="self" />
           <button className="flip" onClick={flipCamera} aria-label={t.flipCamera}>🔄</button>
