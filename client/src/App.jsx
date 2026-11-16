@@ -64,14 +64,32 @@ export default function App() {
     setAgeOk(true);
   }
 
+  // Bind the local stream to the self-view <video> and make sure it actually plays.
+  function attachLocalPreview() {
+    const el = localRef.current;
+    const stream = streamRef.current;
+    if (!el || !stream) return;
+    if (el.srcObject !== stream) el.srcObject = stream;
+    el.muted = true; // required for autoplay of a self-view
+    const p = el.play();
+    if (p && typeof p.catch === 'function') p.catch((err) => console.warn('local preview play() blocked:', err?.name, err?.message));
+  }
+
   async function startCamera() {
-    if (streamRef.current) return streamRef.current;
     // getUserMedia only exists in a secure context (HTTPS or localhost).
     if (!window.isSecureContext || !navigator.mediaDevices?.getUserMedia) {
       const e = new Error('insecure context'); e.name = 'InsecureContextError'; throw e;
     }
-    streamRef.current = await navigator.mediaDevices.getUserMedia({ video: true, audio: true });
-    if (localRef.current) localRef.current.srcObject = streamRef.current;
+    if (!streamRef.current) {
+      streamRef.current = await navigator.mediaDevices.getUserMedia({ video: true, audio: true });
+      // Log what we actually got so a black preview can be diagnosed (no device / black frame vs. render bug).
+      for (const tr of streamRef.current.getTracks()) {
+        console.info(`camera track: kind=${tr.kind} label=${tr.label || '(none)'} state=${tr.readyState} enabled=${tr.enabled}`);
+      }
+      if (!streamRef.current.getVideoTracks().length) console.warn('getUserMedia returned no video track');
+    }
+    // Always (re)bind + play, even when reusing an existing stream after Stop/Start.
+    attachLocalPreview();
     return streamRef.current;
   }
 
