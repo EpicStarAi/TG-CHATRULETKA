@@ -66,9 +66,34 @@ export default function App() {
 
   async function startCamera() {
     if (streamRef.current) return streamRef.current;
+    // getUserMedia only exists in a secure context (HTTPS or localhost).
+    if (!window.isSecureContext || !navigator.mediaDevices?.getUserMedia) {
+      const e = new Error('insecure context'); e.name = 'InsecureContextError'; throw e;
+    }
     streamRef.current = await navigator.mediaDevices.getUserMedia({ video: true, audio: true });
     if (localRef.current) localRef.current.srcObject = streamRef.current;
     return streamRef.current;
+  }
+
+  // Map a getUserMedia failure to a specific, translated hint (and log the raw error for debugging).
+  function cameraErrorText(err) {
+    console.error('startCamera failed:', err?.name, err?.message, err);
+    switch (err?.name) {
+      case 'NotAllowedError':
+      case 'SecurityError':
+        return inTelegram ? t.cameraWeb : t.cameraNoPermission;
+      case 'NotFoundError':
+      case 'OverconstrainedError':
+        return t.cameraNotFound;
+      case 'NotReadableError':
+      case 'AbortError':
+        return t.cameraInUse;
+      case 'InsecureContextError':
+      case 'TypeError':
+        return t.cameraInsecure;
+      default:
+        return t.cameraDenied;
+    }
   }
 
   function closePeer() {
@@ -110,7 +135,7 @@ export default function App() {
 
   async function connect() {
     setError('');
-    try { await startCamera(); } catch { setError(t.cameraDenied); return; }
+    try { await startCamera(); } catch (e) { setError(cameraErrorText(e)); return; }
     const ws = new WebSocket(`${WS_BASE}/ws?token=${encodeURIComponent(token)}`);
     wsRef.current = ws;
     ws.onopen = () => { setStatus('searching'); ws.send(JSON.stringify({ type: 'start' })); };
