@@ -16,10 +16,6 @@ export default function App() {
   const [error, setError] = useState('');
   // UI-only redesign state (filters/toggles are visual for now; wired to the backend later).
   const [showSettings, setShowSettings] = useState(false);
-  const [gender, setGender] = useState(localStorage.getItem('gender') || 'any');
-  const [country, setCountry] = useState(localStorage.getItem('country') || 'any');
-  const [translate, setTranslate] = useState(localStorage.getItem('translate') === '1');
-  const [safeMode, setSafeMode] = useState(localStorage.getItem('safeMode') === '1');
   const [online, setOnline] = useState(null);
   const facingRef = useRef('user'); // 'user' | 'environment' for camera flip
 
@@ -48,10 +44,6 @@ export default function App() {
     return () => { alive = false; clearInterval(id); };
   }, []);
 
-  useEffect(() => { localStorage.setItem('gender', gender); }, [gender]);
-  useEffect(() => { localStorage.setItem('country', country); }, [country]);
-  useEffect(() => { localStorage.setItem('translate', translate ? '1' : '0'); }, [translate]);
-  useEffect(() => { localStorage.setItem('safeMode', safeMode ? '1' : '0'); }, [safeMode]);
 
   // Telegram Mini App sign-in with initData. Runs automatically on open and again from the button.
   const tg = window.Telegram?.WebApp;
@@ -270,13 +262,6 @@ export default function App() {
     );
   }
 
-  const COUNTRIES = [
-    { code: 'any', flag: '🌍' }, { code: 'RU', flag: '🇷🇺' }, { code: 'UA', flag: '🇺🇦' },
-    { code: 'US', flag: '🇺🇸' }, { code: 'PH', flag: '🇵🇭' }, { code: 'DE', flag: '🇩🇪' },
-    { code: 'TR', flag: '🇹🇷' }, { code: 'IN', flag: '🇮🇳' },
-  ];
-  const curCountry = COUNTRIES.find((c) => c.code === country) || COUNTRIES[0];
-  const genderEmoji = { any: '👥', male: '👨', female: '👩' }[gender] || '👥';
   const active = status !== 'idle';
 
   if (showSettings) {
@@ -294,24 +279,8 @@ export default function App() {
               {LANGS.map((l) => <option key={l.code} value={l.code}>{l.label}</option>)}
             </select>
           </label>
-          <div className="row">
-            <span className="row-ic">🔤</span>
-            <span className="row-main"><span className="row-title">{t.translateMessages}</span></span>
-            <button role="switch" aria-checked={translate} className={`toggle${translate ? ' on' : ''}`} onClick={() => setTranslate((v) => !v)}><span /></button>
-          </div>
-          <div className="row">
-            <span className="row-ic">🛡️</span>
-            <span className="row-main"><span className="row-title">{t.safeMode}</span></span>
-            <button role="switch" aria-checked={safeMode} className={`toggle${safeMode ? ' on' : ''}`} onClick={() => setSafeMode((v) => !v)}><span /></button>
-          </div>
-          <a className="row link" href={`${API}/legal/rules`} target="_blank" rel="noreferrer"><span className="row-ic">📋</span><span className="row-main"><span className="row-title">{t.chatRules}</span></span><span className="chev">›</span></a>
-          <a className="row link" href={`${API}/legal/agreement`} target="_blank" rel="noreferrer"><span className="row-ic">✅</span><span className="row-main"><span className="row-title">{t.userAgreement}</span></span><span className="chev">›</span></a>
-          <a className="row link" href={`${API}/legal/privacy`} target="_blank" rel="noreferrer"><span className="row-ic">🔒</span><span className="row-main"><span className="row-title">{t.privacyPolicy}</span></span><span className="chev">›</span></a>
           <button className="row link" onClick={logout}><span className="row-ic">↩️</span><span className="row-main"><span className="row-title">{t.logout}</span></span></button>
         </div>
-        <button className="row danger" onClick={() => { if (window.confirm(t.deleteConfirm)) logout(); }}>
-          <span className="row-ic">🗑️</span><span className="row-main"><span className="row-title">{t.deleteProfile}</span></span>
-        </button>
       </div>
     );
   }
@@ -337,18 +306,6 @@ export default function App() {
       </section>
 
       <section className="panel">
-        <div className="filters">
-          <button className="pill" onClick={() => setGender((g) => (g === 'any' ? 'male' : g === 'male' ? 'female' : 'any'))} disabled={active}>
-            <span className="pill-label">{t.yourGender}</span><span className="pill-val">{genderEmoji}</span>
-          </button>
-          <label className="pill as-select">
-            <span className="pill-label">{t.country}</span><span className="pill-val">{curCountry.flag}</span>
-            <select value={country} onChange={(e) => setCountry(e.target.value)} disabled={active} aria-label={t.country}>
-              {COUNTRIES.map((c) => <option key={c.code} value={c.code}>{c.flag} {c.code === 'any' ? t.genderAny : c.code}</option>)}
-            </select>
-          </label>
-        </div>
-
         {!active && (
           <div className="rules">
             <span className="rules-ic">📹</span>
