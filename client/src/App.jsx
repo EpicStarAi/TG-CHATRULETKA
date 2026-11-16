@@ -14,6 +14,10 @@ export default function App() {
   const [text, setText] = useState('');
   const [config, setConfig] = useState(null);
   const [error, setError] = useState('');
+  // UI-only redesign state (filters/toggles are visual for now; wired to the backend later).
+  const [showSettings, setShowSettings] = useState(false);
+  const [online, setOnline] = useState(null);
+  const facingRef = useRef('user'); // 'user' | 'environment' for camera flip
 
   const t = T[lang];
   const wsRef = useRef(null);
@@ -28,6 +32,18 @@ export default function App() {
   useEffect(() => {
     fetch(`${API}/config`).then((r) => r.json()).then(setConfig).catch(() => setConfig({ iceServers: [] }));
   }, []);
+
+  // Live online counter from /health (real connected count).
+  useEffect(() => {
+    let alive = true;
+    const tick = () => fetch(`${API}/health`).then((r) => r.json())
+      .then((d) => { if (alive) setOnline(typeof d.online === 'number' ? d.online : null); })
+      .catch(() => {});
+    tick();
+    const id = setInterval(tick, 10000);
+    return () => { alive = false; clearInterval(id); };
+  }, []);
+
 
   // Telegram Mini App sign-in with initData. Runs automatically on open and again from the button.
   const tg = window.Telegram?.WebApp;
@@ -64,11 +80,81 @@ export default function App() {
     setAgeOk(true);
   }
 
+  // Bind the local stream to the self-view <video> and make sure it actually plays.
+  function attachLocalPreview() {
+    const el = localRef.current;
+    const stream = streamRef.current;
+    if (!el || !stream) return;
+    if (el.srcObject !== stream) el.srcObject = stream;
+    el.muted = true; // required for autoplay of a self-view
+    const p = el.play();
+    if (p && typeof p.catch === 'function') p.catch((err) => console.warn('local preview play() blocked:', err?.name, err?.message));
+  }
+
   async function startCamera() {
-    if (streamRef.current) return streamRef.current;
-    streamRef.current = await navigator.mediaDevices.getUserMedia({ video: true, audio: true });
-    if (localRef.current) localRef.current.srcObject = streamRef.current;
+    // getUserMedia only exists in a secure context (HTTPS or localhost).
+    if (!window.isSecureContext || !navigator.mediaDevices?.getUserMedia) {
+      const e = new Error('insecure context'); e.name = 'InsecureContextError'; throw e;
+    }
+    if (!streamRef.current) {
+      streamRef.current = await navigator.mediaDevices.getUserMedia({ video: { facingMode: facingRef.current }, audio: true });
+      // Log what we actually got so a black preview can be diagnosed (no device / black frame vs. render bug).
+      for (const tr of streamRef.current.getTracks()) {
+        console.info(`camera track: kind=${tr.kind} label=${tr.label || '(none)'} state=${tr.readyState} enabled=${tr.enabled}`);
+      }
+      if (!streamRef.current.getVideoTracks().length) console.warn('getUserMedia returned no video track');
+    }
+    // Always (re)bind + play, even when reusing an existing stream after Stop/Start.
+    attachLocalPreview();
     return streamRef.current;
+  }
+
+  // Switch between front/back cameras, replacing the outgoing track on the live peer connection.
+  async function flipCamera() {
+    if (!streamRef.current) return;
+    const next = facingRef.current === 'user' ? 'environment' : 'user';
+    try {
+      const ns = await navigator.mediaDevices.getUserMedia({ video: { facingMode: next }, audio: false });
+      const newTrack = ns.getVideoTracks()[0];
+      if (!newTrack) throw new Error('no video track');
+      const sender = pcRef.current?.getSenders?.().find((s) => s.track && s.track.kind === 'video');
+      if (sender) await sender.replaceTrack(newTrack);
+      const old = streamRef.current.getVideoTracks()[0];
+      if (old) { streamRef.current.removeTrack(old); old.stop(); }
+      streamRef.current.addTrack(newTrack);
+      facingRef.current = next;
+      attachLocalPreview();
+    } catch (e) { console.warn('flip camera failed:', e?.name, e?.message); }
+  }
+
+  function logout() {
+    try { wsRef.current?.close(); } catch { /* ignore */ }
+    closePeer();
+    streamRef.current?.getTracks().forEach((tr) => tr.stop());
+    streamRef.current = null;
+    localStorage.removeItem('token');
+    setToken(''); setStatus('idle'); setShowSettings(false); setMessages([]); setPeerName('');
+  }
+
+  // Map a getUserMedia failure to a specific, translated hint (and log the raw error for debugging).
+  function cameraErrorText(err) {
+    console.error('startCamera failed:', err?.name, err?.message, err);
+    switch (err?.name) {
+      case 'NotAllowedError':
+      case 'SecurityError':
+        return inTelegram ? t.cameraWeb : t.cameraNoPermission;
+      case 'NotFoundError':
+      case 'OverconstrainedError':
+        return t.cameraNotFound;
+      case 'NotReadableError':
+      case 'AbortError':
+        return t.cameraInUse;
+      case 'InsecureContextError':
+      case 'TypeError':
+        return t.cameraInsecure;
+      default:
+        return t.cameraDenied;
+    }
   }
 
   function closePeer() {
@@ -110,7 +196,7 @@ export default function App() {
 
   async function connect() {
     setError('');
-    try { await startCamera(); } catch { setError(t.cameraDenied); return; }
+    try { await startCamera(); } catch (e) { setError(cameraErrorText(e)); return; }
     const ws = new WebSocket(`${WS_BASE}/ws?token=${encodeURIComponent(token)}`);
     wsRef.current = ws;
     ws.onopen = () => { setStatus('searching'); ws.send(JSON.stringify({ type: 'start' })); };
@@ -176,31 +262,75 @@ export default function App() {
     );
   }
 
+  const active = status !== 'idle';
+
+  if (showSettings) {
+    return (
+      <div className="app settings">
+        <header className="sheet-head">
+          <button className="icon-btn" onClick={() => setShowSettings(false)} aria-label="Back">←</button>
+          <h1>{t.settingsTitle}</h1>
+        </header>
+        <div className="list">
+          <label className="row">
+            <span className="row-ic">🌐</span>
+            <span className="row-main"><span className="row-title">{t.languageLabel}</span></span>
+            <select className="row-select" value={lang} onChange={(e) => setLang(e.target.value)} aria-label={t.languageLabel}>
+              {LANGS.map((l) => <option key={l.code} value={l.code}>{l.label}</option>)}
+            </select>
+          </label>
+          <button className="row link" onClick={logout}><span className="row-ic">↩️</span><span className="row-main"><span className="row-title">{t.logout}</span></span></button>
+        </div>
+      </div>
+    );
+  }
+
   return (
-    <div className="screen chat">
-      <header className="brand"><img src="/logo.svg" alt="" /><h1>TG⭐CHATRULETKA</h1>{LangPicker}</header>
-      <div className="videos">
+    <div className="app chat">
+      <section className="stage">
+        <button className="gear" onClick={() => setShowSettings(true)} aria-label={t.settingsTitle}>⚙</button>
         <video ref={remoteRef} autoPlay playsInline className="remote" />
-        <video ref={localRef} autoPlay playsInline muted className="local" />
-        {status !== 'matched' && <div className="overlay">{status === 'searching' ? t.searching : t.readyText}</div>}
+        {!active && (
+          <div className="hero">
+            <img src="/logo.svg" alt="" className="hero-logo" />
+            <div className="hero-title">TG⭐CHATRULETKA</div>
+            {online != null && <div className="hero-online"><span className="dot" />{online.toLocaleString()} {t.online}</div>}
+          </div>
+        )}
+        {active && status !== 'matched' && <div className="overlay">{t.searching}</div>}
         {peerName && <div className="peer">{peerName}</div>}
-      </div>
-      {error && <p className="error">{error}</p>}
-      <div className="messages">
-        {messages.map((m, i) => <div key={i} className={m.from === 'me' ? 'msg me' : 'msg'}>{m.text}</div>)}
-      </div>
-      <form className="chatbar" onSubmit={sendChat}>
-        <input value={text} onChange={(e) => setText(e.target.value)} placeholder={t.typeMessage} maxLength={500} />
-        <button type="submit" className="btn send" aria-label={t.send}>➤</button>
-      </form>
-      <div className="controls">
-        {status === 'idle'
-          ? <button className="btn primary" onClick={connect}>{t.start}</button>
-          : <button className="btn stop" onClick={stop}>{t.stop}</button>}
-        <button className="btn next" onClick={sendNext} disabled={status === 'idle'}>{t.next}</button>
-        <button className="btn ghost" onClick={report} disabled={status !== 'matched'}>{t.report}</button>
-        <button className="btn ghost" onClick={block} disabled={status !== 'matched'}>{t.block}</button>
-      </div>
+        <div className="self-wrap">
+          <video ref={localRef} autoPlay playsInline muted className="self" />
+          <button className="flip" onClick={flipCamera} aria-label={t.flipCamera}>🔄</button>
+        </div>
+      </section>
+
+      <section className="panel">
+        {!active && (
+          <div className="rules">
+            <span className="rules-ic">📹</span>
+            <p>{t.rulesNote}</p>
+          </div>
+        )}
+        {active && (
+          <div className="messages">
+            {messages.map((m, i) => <div key={i} className={m.from === 'me' ? 'msg me' : 'msg'}>{m.text}</div>)}
+          </div>
+        )}
+        {error && <p className="error">{error}</p>}
+
+        <form className="composer" onSubmit={sendChat}>
+          <input value={text} onChange={(e) => setText(e.target.value)} placeholder={t.typeMessage} maxLength={500} disabled={status !== 'matched'} />
+          <button type="submit" className="send" aria-label={t.send} disabled={status !== 'matched'}>➤</button>
+        </form>
+
+        <div className="actions">
+          <button className="big stop" onClick={stop} disabled={!active}>{t.stop}</button>
+          {status === 'matched'
+            ? <button className="big start" onClick={sendNext}>{t.next}</button>
+            : <button className="big start" onClick={connect} disabled={status === 'searching'}>{t.start}</button>}
+        </div>
+      </section>
     </div>
   );
 }
