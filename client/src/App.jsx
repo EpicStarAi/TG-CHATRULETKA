@@ -18,6 +18,7 @@ export default function App() {
   const [showSettings, setShowSettings] = useState(false);
   const [online, setOnline] = useState(null);
   const facingRef = useRef('user'); // 'user' | 'environment' for camera flip
+  const flipBusyRef = useRef(false); // guard against overlapping camera flips
   const [iceState, setIceState] = useState(''); // live ICE state for on-screen diagnostics
   const [gotRemote, setGotRemote] = useState(false); // whether a remote media track has arrived
   const pendingCandidatesRef = useRef([]); // ICE candidates received before remoteDescription is set
@@ -113,21 +114,39 @@ export default function App() {
   }
 
   // Switch between front/back cameras, replacing the outgoing track on the live peer connection.
+  function getCamera(mode, exact) {
+    return navigator.mediaDevices.getUserMedia({
+      video: exact ? { facingMode: { exact: mode } } : { facingMode: mode }, audio: false,
+    });
+  }
+  async function useVideoTrack(track) {
+    streamRef.current.addTrack(track);
+    const sender = pcRef.current?.getSenders?.().find((s) => s.track && s.track.kind === 'video');
+    if (sender) await sender.replaceTrack(track); // keep sending to the peer on the live call
+    attachLocalPreview();
+  }
   async function flipCamera() {
-    if (!streamRef.current) return;
-    const next = facingRef.current === 'user' ? 'environment' : 'user';
+    if (!streamRef.current || flipBusyRef.current) return;
+    flipBusyRef.current = true;
+    const prev = facingRef.current;
+    const next = prev === 'user' ? 'environment' : 'user';
+    // Release the current camera FIRST — many phones can't open the second camera while the first is live.
+    const old = streamRef.current.getVideoTracks()[0];
+    if (old) { streamRef.current.removeTrack(old); old.stop(); }
     try {
-      const ns = await navigator.mediaDevices.getUserMedia({ video: { facingMode: next }, audio: false });
-      const newTrack = ns.getVideoTracks()[0];
-      if (!newTrack) throw new Error('no video track');
-      const sender = pcRef.current?.getSenders?.().find((s) => s.track && s.track.kind === 'video');
-      if (sender) await sender.replaceTrack(newTrack);
-      const old = streamRef.current.getVideoTracks()[0];
-      if (old) { streamRef.current.removeTrack(old); old.stop(); }
-      streamRef.current.addTrack(newTrack);
+      let ns;
+      try { ns = await getCamera(next, true); }       // force the other camera
+      catch { ns = await getCamera(next, false); }      // fall back if `exact` isn't supported
+      const track = ns.getVideoTracks()[0];
+      if (!track) throw new Error('no video track');
+      await useVideoTrack(track);
       facingRef.current = next;
-      attachLocalPreview();
-    } catch (e) { console.warn('flip camera failed:', e?.name, e?.message); }
+    } catch (e) {
+      console.warn('flip camera failed:', e?.name, e?.message);
+      // Couldn't open the other camera — restore the previous one so the preview isn't left dead.
+      try { const ns = await getCamera(prev, false); const rt = ns.getVideoTracks()[0]; if (rt) await useVideoTrack(rt); } catch { /* give up */ }
+      setError(t.cameraInUse);
+    } finally { flipBusyRef.current = false; }
   }
 
   function logout() {
